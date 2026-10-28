@@ -52,6 +52,9 @@ const COMPOSE_NAMES: &[&str] = &[
 
 const MANIFEST_NAMES: &[&str] = &["pnpm-workspace.yaml", "turbo.json", "nx.json"];
 
+/// direnv config file name.
+const DIRENV_NAME: &str = ".envrc";
+
 const CI_NAMES: &[&str] = &[".gitlab-ci.yml", "circle.yml"];
 
 /// A single file-backed source discovered by [`scan`].
@@ -124,6 +127,12 @@ fn classify(rel_path: &Path) -> Option<SourceKind> {
     if DOTENV_EXAMPLE_NAMES.contains(&file_name) {
         return Some(SourceKind::DotenvExample);
     }
+    if file_name == DIRENV_NAME {
+        return Some(SourceKind::Direnv);
+    }
+    if is_dockerfile(file_name) {
+        return Some(SourceKind::Dockerfile);
+    }
     if COMPOSE_NAMES.contains(&file_name) {
         return Some(SourceKind::Compose);
     }
@@ -138,6 +147,23 @@ fn classify(rel_path: &Path) -> Option<SourceKind> {
     }
 
     None
+}
+
+/// Match `Dockerfile`, `Dockerfile.<suffix>` (e.g. `Dockerfile.prod`),
+/// `<prefix>.Dockerfile`, and the Podman `Containerfile` equivalents. Matching
+/// is case-insensitive so `dockerfile` on case-sensitive filesystems is also
+/// caught.
+fn is_dockerfile(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    for stem in ["dockerfile", "containerfile"] {
+        if lower == stem
+            || lower.starts_with(&format!("{stem}."))
+            || lower.ends_with(&format!(".{stem}"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// `.github/workflows/*.yml` or `*.yaml`, matched by relative-path suffix so
@@ -409,9 +435,33 @@ mod tests {
 
         touch(root, "README.md");
         touch(root, "env.txt");
-        touch(root, ".envrc");
+        touch(root, "notes.env.md");
 
         assert_eq!(scan_default(root), Vec::new());
+    }
+
+    #[test]
+    fn finds_direnv_and_dockerfiles() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+
+        let files: &[(&str, SourceKind)] = &[
+            (".envrc", SourceKind::Direnv),
+            ("Dockerfile", SourceKind::Dockerfile),
+            ("Dockerfile.prod", SourceKind::Dockerfile),
+            ("api.dockerfile", SourceKind::Dockerfile),
+            ("Containerfile", SourceKind::Dockerfile),
+        ];
+        for (f, _) in files {
+            touch(root, f);
+        }
+
+        let expected: Vec<(PathBuf, SourceKind)> = files
+            .iter()
+            .map(|(f, kind)| (PathBuf::from(f), *kind))
+            .collect();
+
+        assert_eq!(sorted(scan_default(root)), sorted(expected));
     }
 
     #[test]
@@ -419,11 +469,12 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path();
 
-        // On case-insensitive filesystems directories may have mixed case.
-        touch(root, ".GitHub/workflows/ci.yml");
-        touch(root, ".github/workflows/other.yml");
-        touch(root, ".CircleCI/config.yml");
-        touch(root, ".circleci/config.yml");
+        // Keep same-name case variants under distinct parents so this test is
+        // stable on both case-sensitive and case-insensitive filesystems.
+        touch(root, "mixed-github/.GitHub/workflows/ci.yml");
+        touch(root, "lower-github/.github/workflows/other.yml");
+        touch(root, "mixed-circle/.CircleCI/config.yml");
+        touch(root, "lower-circle/.circleci/config.yml");
 
         let result = scan_default(root);
         let kinds: Vec<_> = result.iter().map(|(_, k)| *k).collect();
